@@ -1,0 +1,1535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LPS Vilakkupara Kalolsavam Portal</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        /* Custom CSS for General Styling */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0fdf4; /* Light Emerald Background */
+            color: #1f2937;
+        }
+
+        /* Heading Animation */
+        @keyframes color-change {
+            0% { color: #facc15; }
+            33% { color: #ef4444; }
+            66% { color: #3b82f6; }
+            100% { color: #059669; }
+        }
+
+        .animated-heading {
+            animation: color-change 6s infinite alternate;
+            letter-spacing: 0.02em;
+        }
+
+        /* Ensure all form elements and buttons have sufficient touch target size for mobile */
+        input[type="text"], input[type="tel"], input[type="number"], select, button {
+            min-height: 44px; 
+        }
+
+        /* Stylesheet for printing the participant card */
+        @media print {
+            body > *:not(#print-card-container) {
+                display: none !important;
+            }
+            #print-card-container {
+                display: block !important;
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                padding: 10px;
+                margin: 0;
+            }
+            .print-card {
+                /* Make print card fluid but keep it centered and constrained */
+                max-width: 320px; 
+                margin: 0 auto;
+            }
+            .no-print {
+                display: none !important;
+            }
+        }
+        /* Prose class for styled markdown rendering */
+        .prose {
+            color: #1f2937;
+            max-width: 65ch;
+            margin: 0 auto;
+        }
+        .prose h1, .prose h2, .prose h3 {
+            color: #047857; /* Emerald-800 */
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            font-weight: 700;
+        }
+        .prose p {
+            margin-bottom: 1em;
+        }
+        .prose ul, .prose ol {
+            padding-left: 1.5em;
+            margin-bottom: 1em;
+        }
+        .prose li {
+            margin-bottom: 0.5em;
+        }
+        .prose table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1em 0;
+        }
+        .prose th, .prose td {
+            border: 1px solid #d1d5db; /* Gray-300 */
+            padding: 0.5em 0.75em;
+            text-align: left;
+        }
+        .prose th {
+            background-color: #f3f4f6; /* Gray-100 */
+        }
+    </style>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Import Firebase modules for use inside the script module
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            addDoc, 
+            updateDoc, 
+            deleteDoc, 
+            onSnapshot, 
+            query, 
+            setDoc,
+            serverTimestamp,
+            increment,
+            getDoc,
+            runTransaction
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Firestore Debug Logging
+        setLogLevel('Debug');
+
+        // --- GLOBAL FIREBASE VARIABLES (provided by the Canvas environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase instances (declared in module scope)
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        let isAdminLoggedIn = false; 
+        let currentAdminView = 'item-management'; 
+        let currentPublicView = 'registration'; 
+
+        // Global state for items, participants, and results
+        let kalolsavamItems = [];
+        let participantsData = [];
+        let resultsData = []; 
+        let participantPhotoBase64 = null; 
+
+        // Hardcoded Admin Credentials (Client-side UI access control)
+        const ADMIN_USER = "Admin";
+        const ADMIN_PASS = "Ahmad@123";
+
+        // Firestore reference paths (Scoped to the current userId for private data access)
+        const ADMIN_CONFIG_DOC_PATH = (uid) => `/artifacts/${appId}/users/${uid}/config/counter`; 
+        const PARTICIPANTS_COL_PATH = (uid) => `/artifacts/${appId}/users/${uid}/participants`;
+        const ITEMS_COL_PATH = (uid) => `/artifacts/${appId}/users/${uid}/kalolsavam_items`;
+        const RESULTS_COL_PATH = (uid) => `/artifacts/${appId}/users/${uid}/results`;
+        
+        // Gemini API Configuration
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=`;
+        const API_KEY = ""; // Placeholder, handled by Canvas environment
+
+        // DOM utility functions
+        const getEl = id => document.getElementById(id);
+
+        /**
+         * Switches the main public view (Registration or Results).
+         */
+        const switchPublicView = (view) => {
+            currentPublicView = view;
+            getEl('registration-panel').classList.toggle('hidden', view !== 'registration');
+            getEl('public-results-panel').classList.toggle('hidden', view !== 'results');
+            
+            // Highlight active button
+            getEl('btn-view-registration').classList.toggle('bg-emerald-700', view === 'registration');
+            getEl('btn-view-registration').classList.toggle('bg-emerald-500', view !== 'registration');
+            getEl('btn-view-results').classList.toggle('bg-red-700', view === 'results');
+            getEl('btn-view-results').classList.toggle('bg-red-500', view !== 'results');
+
+            if (view === 'results') {
+                renderPublicResultsControls(); 
+            }
+        };
+
+        // --- Custom UI Utilities ---
+
+        /**
+         * Shows a temporary, styled message box instead of alert().
+         */
+        const showMessage = (message, type = 'success') => {
+            const messageBox = getEl('message-box');
+            let bgColor = 'bg-emerald-500';
+            if (type === 'error') bgColor = 'bg-red-500';
+            if (type === 'info') bgColor = 'bg-sky-500';
+            if (type === 'warning') bgColor = 'bg-amber-500';
+            
+            messageBox.textContent = message;
+            messageBox.className = `p-4 text-white rounded-lg shadow-xl fixed top-4 left-1/2 transform -translate-x-1/2 z-50 transition-opacity duration-300 ${bgColor}`;
+            messageBox.style.opacity = '1';
+
+            setTimeout(() => {
+                messageBox.style.opacity = '0';
+            }, 3000);
+        };
+
+        /**
+         * Replaces window.confirm with a custom modal.
+         */
+        function customConfirm(message) {
+            return new Promise((resolve) => {
+                const modal = getEl('confirm-modal');
+                const modalMessage = getEl('confirm-message');
+                const confirmBtn = getEl('confirm-yes');
+                const cancelBtn = getEl('confirm-no');
+
+                modalMessage.textContent = message;
+                modal.classList.remove('hidden');
+
+                const handler = (e) => {
+                    modal.classList.add('hidden');
+                    confirmBtn.removeEventListener('click', confirmHandler);
+                    cancelBtn.removeEventListener('click', cancelHandler);
+                    resolve(e.target === confirmBtn);
+                };
+
+                const confirmHandler = (e) => handler(e);
+                const cancelHandler = (e) => handler(e);
+
+                confirmBtn.addEventListener('click', confirmHandler);
+                cancelBtn.addEventListener('click', cancelHandler);
+            });
+        }
+
+        /**
+         * Handles the file input change event to display a local preview and convert to Base64.
+         */
+        function previewImage(event) {
+            const file = event.target.files[0];
+            const previewEl = getEl('photo-preview');
+
+            if (!file || !file.type.startsWith('image/')) {
+                previewEl.src = "https://placehold.co/100x100/34d399/ffffff?text=Photo";
+                participantPhotoBase64 = null;
+                return;
+            }
+
+            const maxSizeKB = 500; 
+            if (file.size > maxSizeKB * 1024) {
+                showMessage(`File is too large. Max size is ${maxSizeKB}KB.`, 'error');
+                event.target.value = ''; 
+                previewEl.src = "https://placehold.co/100x100/ef4444/ffffff?text=Error";
+                participantPhotoBase64 = null;
+                return;
+            }
+
+            const reader = new FileReader();
+            
+            reader.onloadstart = () => {
+                previewEl.src = "https://placehold.co/100x100/3b82f6/ffffff?text=Loading";
+            };
+
+            reader.onload = (e) => {
+                previewEl.src = e.target.result;
+                participantPhotoBase64 = e.target.result;
+                showMessage('Photo selected successfully!', 'info');
+            };
+            
+            reader.onerror = () => {
+                showMessage('Error reading file. Try a different image format.', 'error');
+                previewEl.src = "https://placehold.co/100x100/ef4444/ffffff?text=Error";
+                participantPhotoBase64 = null;
+            };
+            
+            reader.readAsDataURL(file);
+        }
+
+        // --- LLM API Logic ---
+
+        /**
+         * Calls the Gemini API with exponential backoff.
+         */
+        async function callGemini(userQuery, systemPrompt) {
+            if (typeof marked === 'undefined') {
+                throw new Error("Markdown renderer (marked.js) not available. Cannot generate LLM content.");
+            }
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            const maxRetries = 3;
+            let delay = 1000;
+
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(GEMINI_API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 429 && i < maxRetries - 1) { 
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            delay *= 2; 
+                            continue;
+                        }
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    return result.candidates?.[0]?.content?.parts?.[0]?.text || "Error: Could not generate content.";
+                } catch (error) {
+                    console.error(`Attempt ${i + 1} failed:`, error);
+                    if (i === maxRetries - 1) throw new Error("Gemini API call failed after multiple retries.");
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                }
+            }
+        }
+
+
+        /**
+         * ADMIN ACTION: Uses Gemini to generate a judging rubric for a cultural item.
+         */
+        const handleGenerateRubric = async (itemName) => {
+            const rubricContentEl = getEl('report-content');
+            const rubricTitleEl = getEl('report-title');
+            const rubricModal = getEl('report-modal');
+
+            rubricTitleEl.textContent = `Judging Rubric for ${itemName}`;
+            rubricContentEl.innerHTML = '<div class="text-center py-8 text-lg text-sky-600 font-semibold flex items-center justify-center space-x-2"><svg class="animate-spin h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Generating professional criteria...</span></div>';
+            rubricModal.classList.remove('hidden');
+
+            const systemPrompt = "You are a professional competition judge and cultural administrator. Your task is to generate a detailed, objective, and fair judging rubric for a school-level cultural competition (Kalolsavam). Format the output using clear markdown.";
+            const userQuery = `Generate a comprehensive judging rubric for the cultural competition item: "${itemName}". The rubric must include:
+            1. Exactly four main scoring criteria (e.g., Presentation, Technique, Creativity, Adherence to Theme).
+            2. A suggested maximum score breakdown totaling 100 points (e.g., 25 points per criterion).
+            3. A brief, 1-2 sentence description for each criterion explaining what the judge should look for.`;
+
+            try {
+                const markdownRubric = await callGemini(userQuery, systemPrompt);
+                rubricContentEl.innerHTML = `<div class="prose max-w-none p-2">${marked.parse(markdownRubric)}</div>`;
+                showMessage(`Rubric generated for ${itemName}!`, 'success');
+            } catch (error) {
+                rubricContentEl.innerHTML = `<p class="text-red-500 text-center py-4">Error generating rubric: ${error.message}</p>`;
+                showMessage("Failed to generate rubric.", 'error');
+            }
+        };
+
+        /**
+         * ADMIN ACTION: Uses Gemini to generate a report (individual item or overall).
+         */
+        const handleGenerateReport = async (reportType, item) => {
+            const reportContentEl = getEl('report-content');
+            const reportTitleEl = getEl('report-title');
+            const reportModal = getEl('report-modal');
+
+            reportTitleEl.textContent = reportType === 'item' ? `Performance Report for ${item.name}` : `Overall Kalolsavam Competition Report`;
+            reportContentEl.innerHTML = '<div class="text-center py-8 text-lg text-sky-600 font-semibold flex items-center justify-center space-x-2"><svg class="animate-spin h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Generating detailed report...</span></div>';
+            reportModal.classList.remove('hidden');
+
+            const systemPrompt = "You are a data analyst and competition organizer. Your task is to summarize competition results, identify key trends, and provide structured feedback. Output must be in clear markdown.";
+            
+            let reportData = [];
+            let userQuery = "";
+
+            if (reportType === 'item') {
+                const itemResults = resultsData.filter(r => r.itemName === item.name).map(r => ({
+                    name: r.participantName,
+                    code: r.participationCode,
+                    score: r.score,
+                    grade: r.grade,
+                    position: r.position
+                }));
+
+                reportData = itemResults;
+                userQuery = `Analyze the following results for the competition item "${item.name}": ${JSON.stringify(reportData)}. Provide:
+                1. A brief summary of the competition's quality (based on score distribution).
+                2. Identify the top performer and their score/grade.
+                3. Suggest one area where future participants in this item could improve.`;
+
+            } else { // Overall report
+                // Group results by item for overall analysis
+                const groupedResults = kalolsavamItems.map(i => {
+                    const itemResults = resultsData.filter(r => r.itemName === i.name);
+                    const avgScore = itemResults.reduce((sum, r) => sum + (r.score || 0), 0) / (itemResults.length || 1);
+                    const topScore = itemResults.length > 0 ? Math.max(...itemResults.map(r => r.score || 0)) : 0;
+                    return {
+                        item: i.name,
+                        participants: itemResults.length,
+                        averageScore: avgScore.toFixed(2),
+                        topScore: topScore
+                    };
+                }).filter(r => r.participants > 0);
+
+                reportData = groupedResults;
+                userQuery = `Analyze the overall performance across all Kalolsavam items based on the following aggregate data: ${JSON.stringify(reportData)}. Provide:
+                1. A summary of which items had the highest and lowest average scores.
+                2. The total number of unique results entered.
+                3. A general conclusion about the state of the overall competition.`;
+            }
+
+
+            try {
+                const markdownReport = await callGemini(userQuery, systemPrompt);
+                reportContentEl.innerHTML = `<div class="prose max-w-none p-2">${marked.parse(markdownReport)}</div>`;
+                showMessage(`Report generated!`, 'success');
+            } catch (error) {
+                reportContentEl.innerHTML = `<p class="text-red-500 text-center py-4">Error generating report: ${error.message}</p>`;
+                showMessage("Failed to generate report.", 'error');
+            }
+        };
+
+        /**
+         * ADMIN ACTION: Uses Gemini to suggest a competition schedule.
+         */
+        const handleGenerateSchedule = async () => {
+            const reportContentEl = getEl('report-content');
+            const reportTitleEl = getEl('report-title');
+            const reportModal = getEl('report-modal');
+
+            reportTitleEl.textContent = `Suggested Competition Schedule`;
+            reportContentEl.innerHTML = '<div class="text-center py-8 text-lg text-sky-600 font-semibold flex items-center justify-center space-x-2"><svg class="animate-spin h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Analyzing items and estimating time slots...</span></div>';
+            reportModal.classList.remove('hidden');
+
+            if (kalolsavamItems.length === 0) {
+                reportContentEl.innerHTML = '<p class="text-amber-500 text-center py-4">Cannot generate schedule: No cultural items have been added yet.</p>';
+                showMessage("Cannot generate schedule.", 'warning');
+                return;
+            }
+            
+            // Aggregate participant counts per item
+            const itemStats = kalolsavamItems.map(item => {
+                const participantCount = participantsData.filter(p => p.items.includes(item.name)).length;
+                return { name: item.name, participants: participantCount };
+            }).sort((a, b) => b.participants - a.participants); // Sort by highest participants first
+
+            const systemPrompt = "You are an expert cultural event manager. Your task is to create a realistic and logical 1-day competition schedule based on the provided items and participant counts. Assume each item requires a minimum of 10 minutes plus 2 minutes per participant for staging/performance. Include necessary breaks and a 1-hour lunch break (1 PM - 2 PM). Start the competition at 9:00 AM. Prioritize the largest events earlier in the day if possible. Output the result as a detailed markdown table with the columns: Time Slot, Item, Estimated Duration, and Suggested Stage/Venue (e.g., Main Stage, Auditorium).";
+            
+            const userQuery = `Generate a single-day competition schedule starting at 9:00 AM for the following items and participant counts: ${JSON.stringify(itemStats)}.`;
+
+            try {
+                const markdownSchedule = await callGemini(userQuery, systemPrompt);
+                reportContentEl.innerHTML = `<div class="prose max-w-none p-2">${marked.parse(markdownSchedule)}</div>`;
+                showMessage(`Schedule generated successfully!`, 'success');
+            } catch (error) {
+                reportContentEl.innerHTML = `<p class="text-red-500 text-center py-4">Error generating schedule: ${error.message}</p>`;
+                showMessage("Failed to generate schedule.", 'error');
+            }
+        };
+
+
+        // Initialize the 'marked' library for rendering markdown in HTML
+        const markedScript = document.createElement('script');
+        markedScript.src = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
+        document.head.appendChild(markedScript);
+        
+        // --- ADMIN LOGIN/LOGOUT & VIEW SWITCHING ---
+
+        const openAdminLoginModal = () => {
+            const modal = getEl('admin-login-modal');
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                getEl('admin-modal-username').focus();
+            }, 100);
+        };
+
+        const handleAdminLogin = (event) => {
+            event.preventDefault();
+            const username = getEl('admin-modal-username').value;
+            const password = getEl('admin-modal-password').value;
+
+            if (username === ADMIN_USER && password === ADMIN_PASS) {
+                isAdminLoggedIn = true;
+                getEl('admin-login-modal').classList.add('hidden');
+                getEl('btn-admin-login-wrapper').classList.add('hidden');
+                getEl('btn-admin-logout').classList.remove('hidden');
+                getEl('main-view-container').classList.add('hidden');
+                getEl('admin-dashboard-container').classList.remove('hidden');
+                switchAdminView('item-management'); // Default to Item Management
+                showMessage('Admin logged in successfully.', 'success');
+            } else {
+                showMessage('Invalid Admin username or password.', 'error');
+            }
+        };
+
+        const handleAdminLogout = () => {
+            isAdminLoggedIn = false;
+            getEl('btn-admin-login-wrapper').classList.remove('hidden');
+            getEl('btn-admin-logout').classList.add('hidden');
+            getEl('admin-dashboard-container').classList.add('hidden');
+            getEl('main-view-container').classList.remove('hidden');
+            switchPublicView('registration'); // Reset public view
+            showMessage('Admin logged out.', 'info');
+        };
+
+        const switchAdminView = (view) => {
+            currentAdminView = view;
+            const sections = ['item-management', 'participant-list', 'result-entry'];
+            sections.forEach(s => {
+                getEl(`admin-section-${s}`).classList.toggle('hidden', s !== view);
+                getEl(`btn-admin-view-${s}`).classList.toggle('bg-sky-700', s === view);
+                getEl(`btn-admin-view-${s}`).classList.toggle('bg-sky-500', s !== view);
+            });
+
+            if (view === 'result-entry') {
+                renderItemSelectionForResults();
+            }
+        };
+
+        // --- PUBLIC RESULTS LOGIC ---
+
+        /**
+         * Renders the item selection dropdown for the public results page.
+         */
+        const renderPublicResultsControls = () => {
+             const dropdown = getEl('public-results-item-select');
+             dropdown.innerHTML = '<option value="">-- Select an Item --</option>';
+
+             kalolsavamItems.forEach(item => {
+                 const option = document.createElement('option');
+                 option.value = item.name;
+                 option.textContent = item.name;
+                 dropdown.appendChild(option);
+             });
+             
+             // Clear results table initially
+             getEl('public-results-table-body').innerHTML = '<tr class="bg-white"><td colspan="5" class="p-4 text-center text-gray-500">Select an item to view published results.</td></tr>';
+        };
+
+        /**
+         * Filters and displays published results based on the selected item.
+         */
+        const displayPublicResults = (itemName) => {
+            const tableBody = getEl('public-results-table-body');
+            tableBody.innerHTML = '';
+            
+            if (!itemName) {
+                tableBody.innerHTML = '<tr class="bg-white"><td colspan="5" class="p-4 text-center text-gray-500">Select an item to view published results.</td></tr>';
+                return;
+            }
+
+            const publishedResults = resultsData
+                .filter(r => r.itemName === itemName && r.published)
+                // Sort by position (rank) ascending
+                .sort((a, b) => (a.position || Infinity) - (b.position || Infinity));
+
+            if (publishedResults.length === 0) {
+                 tableBody.innerHTML = `<tr class="bg-white"><td colspan="5" class="p-4 text-center text-amber-600">No published results found for ${itemName}.</td></tr>`;
+                return;
+            }
+
+            publishedResults.forEach((r, index) => {
+                const row = document.createElement('tr');
+                row.className = index % 2 === 0 ? 'bg-gray-50' : 'bg-white';
+                row.innerHTML = `
+                    <td class="px-6 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${r.position || 'N/A'}</td>
+                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">${r.participantName}</td>
+                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">${r.participationCode || 'N/A'}</td>
+                    <td class="px-6 py-3 whitespace-nowrap text-sm font-bold text-red-600">${r.grade || 'N/A'}</td>
+                    <td class="px-6 py-3 whitespace-nowrap text-sm text-emerald-600">${r.score || 'N/A'}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        };
+
+        // --- ADMIN RESULT ENTRY LOGIC ---
+
+        /**
+         * Renders the item selection dropdown for the admin result entry page.
+         */
+        const renderItemSelectionForResults = () => {
+            const selectEl = getEl('result-item-select');
+            selectEl.innerHTML = '<option value="">-- Select Item to Enter Results --</option>';
+            kalolsavamItems.forEach(item => {
+                const option = document.createElement('option');
+                option.value = item.id;
+                option.textContent = item.name;
+                selectEl.appendChild(option);
+            });
+            getEl('result-participants-list').innerHTML = '<p class="text-gray-500 italic p-4">Select an item above to load participants.</p>';
+            getEl('result-management-controls').classList.add('hidden'); // Hide controls initially
+        };
+
+        /**
+         * Loads participants and existing results when an item is selected.
+         */
+        const loadParticipantsForResults = (itemId) => {
+            const listEl = getEl('result-participants-list');
+            listEl.innerHTML = '';
+            getEl('result-management-controls').classList.remove('hidden');
+
+            if (!itemId) {
+                listEl.innerHTML = '<p class="text-gray-500 italic p-4">Select an item above to load participants.</p>';
+                getEl('result-management-controls').classList.add('hidden');
+                return;
+            }
+
+            const selectedItem = kalolsavamItems.find(i => i.id === itemId);
+            if (!selectedItem) return;
+            
+            // Participants registered for this item
+            const registeredParticipants = participantsData
+                .filter(p => p.items.includes(selectedItem.name) && p.participationCode)
+                .sort((a, b) => a.participationCode.localeCompare(b.participationCode)); // Sort by code
+
+            // Existing results for this item
+            const existingItemResults = resultsData.filter(r => r.itemId === itemId);
+            const isPublished = existingItemResults.some(r => r.published);
+
+            // Update Publish button state
+            const publishBtn = getEl('btn-publish-results');
+            publishBtn.textContent = isPublished ? 'Unpublish Results' : 'Publish Results';
+            publishBtn.classList.toggle('bg-red-500', isPublished);
+            publishBtn.classList.toggle('hover:bg-red-600', isPublished);
+            publishBtn.classList.toggle('bg-green-500', !isPublished);
+            publishBtn.classList.toggle('hover:bg-green-600', !isPublished);
+            publishBtn.dataset.published = isPublished;
+            publishBtn.dataset.itemId = itemId;
+
+            // Update Report button state
+            const reportBtn = getEl('btn-report-item');
+            reportBtn.dataset.itemId = itemId;
+            reportBtn.dataset.itemName = selectedItem.name;
+
+
+            if (registeredParticipants.length === 0) {
+                listEl.innerHTML = `<p class="text-amber-600 italic p-4">No participants with a code found for ${selectedItem.name}.</p>`;
+                return;
+            }
+
+            registeredParticipants.forEach(p => {
+                const existingResult = existingItemResults.find(r => r.itemId === itemId && r.participantId === p.id);
+                const resultId = existingResult ? existingResult.id : null;
+
+                const card = document.createElement('div');
+                card.className = 'bg-white p-4 rounded-xl shadow-lg border-l-4 border-sky-400 grid grid-cols-2 md:grid-cols-4 gap-4 items-center';
+                card.innerHTML = `
+                    <div class="col-span-2 md:col-span-1">
+                        <p class="font-bold text-lg text-gray-800">${p.name}</p>
+                        <p class="text-sm font-mono text-red-500">${p.participationCode}</p>
+                    </div>
+                    
+                    <input type="number" data-field="score" value="${existingResult?.score || ''}" min="0" max="100" placeholder="Score"
+                           class="col-span-1 w-full px-3 py-2 border rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm"
+                           data-participant-id="${p.id}" data-result-id="${resultId}">
+                           
+                    <input type="text" data-field="grade" value="${existingResult?.grade || ''}" placeholder="Grade" maxlength="2"
+                           class="col-span-1 w-full px-3 py-2 border rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm"
+                           data-participant-id="${p.id}" data-result-id="${resultId}">
+                           
+                    <input type="number" data-field="position" value="${existingResult?.position || ''}" min="1" placeholder="Rank"
+                           class="col-span-1 w-full px-3 py-2 border rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm"
+                           data-participant-id="${p.id}" data-result-id="${resultId}">
+                `;
+                listEl.appendChild(card);
+            });
+        };
+
+        /**
+         * Saves/Updates a single result document in Firestore.
+         */
+        const saveResult = async (participantId, field, value) => {
+            if (!db || !userId) return showMessage("Database not ready.", 'error');
+
+            const itemId = getEl('result-item-select').value;
+            if (!itemId) return;
+
+            const selectedItem = kalolsavamItems.find(i => i.id === itemId);
+            const participant = participantsData.find(p => p.id === participantId);
+            if (!selectedItem || !participant) return;
+
+            // Find existing result document ID
+            const existingResult = resultsData.find(r => r.itemId === itemId && r.participantId === participantId);
+            const resultRef = existingResult 
+                ? doc(db, RESULTS_COL_PATH(userId), existingResult.id)
+                : collection(db, RESULTS_COL_PATH(userId));
+
+            let dataToSave = {
+                itemId: itemId,
+                itemName: selectedItem.name,
+                participantId: participantId,
+                participantName: participant.name,
+                participationCode: participant.participationCode,
+                enteredBy: userId,
+                enteredAt: serverTimestamp(),
+                published: existingResult?.published || false,
+                // Ensure number types are stored as numbers
+                score: existingResult?.score,
+                position: existingResult?.position,
+                grade: existingResult?.grade,
+            };
+            
+            // Update the specific field being edited
+            if (field === 'score' || field === 'position') {
+                // IMPORTANT: Ensure empty string inputs reset the field to null or 0
+                dataToSave[field] = value ? parseInt(value) : null; 
+            } else {
+                dataToSave[field] = value || null;
+            }
+
+            try {
+                if (existingResult) {
+                    await updateDoc(resultRef, { [field]: dataToSave[field] });
+                } else {
+                    await addDoc(resultRef, dataToSave);
+                }
+            } catch (e) {
+                console.error("Error saving result: ", e);
+                showMessage("Error saving result. Check console.", 'error');
+            }
+        };
+
+        /**
+         * Toggles the published status for all results of a specific item.
+         */
+        const togglePublishResults = async (itemId, isCurrentlyPublished) => {
+            if (!db || !userId) return showMessage("Database not ready.", 'error');
+
+            const selectedItem = kalolsavamItems.find(i => i.id === itemId);
+            if (!selectedItem) return;
+
+            const action = isCurrentlyPublished ? 'Unpublish' : 'Publish';
+            if (!(await customConfirm(`Are you sure you want to ${action} results for ${selectedItem.name}? This affects the public view.`))) {
+                return;
+            }
+
+            try {
+                const itemResults = resultsData.filter(r => r.itemId === itemId);
+                const newPublishedStatus = !isCurrentlyPublished;
+
+                // Batch update (simulated here since we cannot use Batch in this environment, using promise.all)
+                const updates = itemResults.map(r => {
+                    const resultRef = doc(db, RESULTS_COL_PATH(userId), r.id);
+                    return updateDoc(resultRef, { published: newPublishedStatus });
+                });
+
+                await Promise.all(updates);
+
+                showMessage(`${selectedItem.name} results successfully ${action.toLowerCase()}ed.`, 'success');
+                loadParticipantsForResults(itemId); // Refresh the view
+            } catch (e) {
+                console.error("Error toggling publish status: ", e);
+                showMessage(`Failed to ${action.toLowerCase()} results.`, 'error');
+            }
+        };
+
+
+        // --- Participant Management ---
+
+        /**
+         * Renders the list of registered participants in the Admin Panel.
+         */
+        const renderParticipantsList = () => {
+            const listEl = getEl('participants-list');
+            listEl.innerHTML = ''; 
+            getEl('participant-count').textContent = participantsData.length;
+
+            if (participantsData.length === 0) {
+                listEl.innerHTML = '<p class="text-center text-sky-600 p-4">No participants registered yet.</p>';
+                return;
+            }
+
+            participantsData.forEach(p => {
+                const itemNames = p.items.join(', ');
+                const code = p.participationCode || 'PENDING';
+                const codeGenerated = !!p.participationCode;
+                const photoSrc = p.photoBase64 || 'https://placehold.co/50x50/34d399/ffffff?text=P';
+                
+                const participantCard = document.createElement('div');
+                participantCard.className = 'bg-white p-4 rounded-xl shadow-lg border-l-4 border-gray-100 hover:shadow-xl transition duration-300 grid grid-cols-1 md:grid-cols-4 gap-4 items-center';
+                participantCard.classList.add(codeGenerated ? 'border-red-500' : 'border-amber-500');
+
+                participantCard.innerHTML = `
+                    <div class="md:col-span-2 flex items-center space-x-3">
+                         <img src="${photoSrc}" 
+                            class="w-12 h-12 rounded-full object-cover border-2 border-emerald-500" 
+                            alt="Participant Photo">
+                        <div>
+                            <p class="font-bold text-lg text-emerald-700">${p.name}</p>
+                            <p class="text-sm text-gray-500">Class: ${p.class} / Div: ${p.division}</p>
+                        </div>
+                    </div>
+
+                    <div class="md:col-span-1">
+                        <p class="text-xs font-semibold text-amber-600 mb-1">Items:</p>
+                        <p class="text-sm text-gray-700 line-clamp-2">${itemNames}</p>
+                    </div>
+                    
+                    <div class="flex flex-col md:items-end space-y-2 md:col-span-1 w-full pt-2">
+                        <p class="text-xl font-extrabold ${codeGenerated ? 'text-red-600' : 'text-gray-400'} leading-none">
+                            ${code}
+                        </p>
+                        <button data-id="${p.id}"
+                                class="generate-print-btn w-full py-2 text-white text-sm font-semibold rounded-lg transition duration-150 shadow-md ${codeGenerated ? 'bg-sky-500 hover:bg-sky-600' : 'bg-emerald-500 hover:bg-emerald-600'}">
+                            ${codeGenerated ? 'Re-Print Card' : 'Generate Code & Print'}
+                        </button>
+                    </div>
+                `;
+                listEl.appendChild(participantCard);
+            });
+        };
+
+        const generateCodeAndPrint = async (participantId) => {
+            if (!db || !userId) {
+                showMessage("Database connection not ready.", 'error');
+                return;
+            }
+            
+            const participant = participantsData.find(p => p.id === participantId);
+            if (!participant) {
+                showMessage("Participant data not found.", 'error');
+                return;
+            }
+            
+            if (participant.participationCode) {
+                 printParticipantCard(participant);
+                 return;
+            }
+
+            try {
+                const configRef = doc(db, ADMIN_CONFIG_DOC_PATH(userId));
+                let newCode = null;
+
+                await runTransaction(db, async (transaction) => {
+                    const configDoc = await transaction.get(configRef);
+                    let currentId = 1;
+
+                    if (configDoc.exists()) {
+                        currentId = configDoc.data().nextParticipantId || 1;
+                    }
+                    
+                    newCode = `KLV-${String(currentId).padStart(3, '0')}`;
+                    
+                    transaction.set(configRef, { nextParticipantId: currentId + 1 }, { merge: true });
+
+                    const participantRef = doc(db, PARTICIPANTS_COL_PATH(userId), participantId);
+                    transaction.update(participantRef, { 
+                        participationCode: newCode,
+                        codeAssignedAt: serverTimestamp() 
+                    });
+                });
+
+                showMessage(`Code ${newCode} generated for ${participant.name}. Preparing to print.`, 'info');
+                
+                // Manually update the in-memory participant object for printing
+                participant.participationCode = newCode; 
+                printParticipantCard(participant);
+
+            } catch (e) {
+                console.error("Transaction failed: ", e);
+                showMessage("Failed to generate code due to a database error. Check console.", 'error');
+            }
+        };
+
+        /**
+         * Print card generation logic. Class `print-card` ensures fluid width on print.
+         */
+        const printParticipantCard = (participant) => {
+            const printContainer = getEl('print-card-container');
+            printContainer.innerHTML = ''; 
+
+            const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+            const photoSrc = participant.photoBase64 || 'https://placehold.co/100x100/34d399/ffffff?text=P';
+
+            const cardHtml = `
+                <div class="print-card w-full mx-auto p-5 border-4 border-red-600 rounded-xl shadow-2xl bg-white">
+                    <div class="text-center mb-3">
+                        <h3 class="text-lg font-extrabold text-red-700 leading-none">LPS VILAKKUPARA</h3>
+                        <h4 class="text-xl font-black text-emerald-800 border-b-2 border-dashed border-gray-300 pb-1">
+                            KALOLSAVAM 2025
+                        </h4>
+                    </div>
+                    
+                    <div class="flex items-center space-x-3 mb-4">
+                        <img src="${photoSrc}" 
+                             class="w-16 h-16 rounded-lg object-cover border-4 border-amber-500 shadow-md flex-shrink-0"
+                             alt="Participant Photo">
+                        <div>
+                            <p class="text-xs text-gray-500">Code:</p>
+                            <p class="text-3xl font-extrabold text-red-600 leading-none">${participant.participationCode}</p>
+                        </div>
+                    </div>
+
+                    <table class="w-full text-sm mb-4">
+                        <tr><td class="font-semibold w-1/3 py-0.5">Name:</td><td class="py-0.5">${participant.name}</td></tr>
+                        <tr><td class="font-semibold w-1/3 py-0.5">School:</td><td class="py-0.5">${participant.school}</td></tr>
+                        <tr><td class="font-semibold w-1/3 py-0.5">Class/Div:</td><td class="py-0.5">${participant.class} / ${participant.division}</td></tr>
+                    </table>
+                    
+                    <div class="border-t border-dashed pt-2">
+                        <p class="font-semibold text-gray-700 mb-1 text-xs">Registered Items:</p>
+                        <ul class="list-disc list-inside text-xs text-gray-600 ml-2">
+                            ${participant.items.map(item => `<li>${item}</li>`).join('')}
+                        </ul>
+                    </div>
+
+                    <div class="flex justify-between items-center text-xs mt-4 pt-2 border-t">
+                        <p class="text-gray-500">Date: ${date}</p>
+                        <p class="font-bold text-gray-700">HM Sign</p>
+                    </div>
+                </div>
+            `;
+            printContainer.innerHTML = cardHtml;
+
+            setTimeout(() => {
+                window.print();
+            }, 100);
+        };
+
+
+        // --- Item Management (Registration & Admin) ---
+        
+        const handleRegistration = async (event) => {
+            event.preventDefault();
+            
+            if (!db || !userId) {
+                showMessage("Database connection not ready. Please wait.", 'error');
+                return;
+            }
+
+            const name = getEl('participant-name').value.trim();
+            const school = getEl('participant-school').value.trim();
+            const className = getEl('participant-class').value.trim();
+            const division = getEl('participant-division').value.trim();
+            const contact = getEl('participant-contact').value.trim();
+            
+            const selectedItems = Array.from(document.querySelectorAll('input[name="items"]:checked')).map(el => el.value);
+            const photoData = participantPhotoBase64 || 'https://placehold.co/100x100/34d399/ffffff?text=P';
+
+            if (!name || !school || !className || !division || !contact || selectedItems.length === 0) {
+                showMessage("Please fill in all mandatory details and select at least one item.", 'error');
+                return;
+            }
+
+            const registrationData = {
+                name: name,
+                school: school,
+                class: className,
+                division: division,
+                contact: contact,
+                photoBase64: photoData,
+                items: selectedItems,
+                registrationDate: serverTimestamp(),
+                registeredBy: userId,
+                participationCode: null
+            };
+
+            try {
+                const participantsColRef = collection(db, PARTICIPANTS_COL_PATH(userId));
+                await addDoc(participantsColRef, registrationData);
+                showMessage("🎉 Registration successful! All the best!", 'success');
+                event.target.reset(); // Clear form
+                getEl('photo-upload').value = ''; // Clear file input
+                getEl('photo-preview').src = "https://placehold.co/100x100/34d399/ffffff?text=Photo";
+                participantPhotoBase64 = null;
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage("An error occurred during registration. Please try again.", 'error');
+            }
+        };
+
+        const renderRegistrationItems = () => {
+            const container = getEl('registration-items-container');
+            container.innerHTML = ''; 
+            
+            if (kalolsavamItems.length === 0) {
+                container.innerHTML = '<p class="text-amber-600 italic col-span-full">Admin needs to add items first.</p>';
+                return;
+            }
+
+            kalolsavamItems.forEach(item => {
+                const itemId = `item-${item.id}`;
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'flex items-center space-x-2 p-2 bg-white rounded-lg shadow-sm hover:shadow-md transition duration-150';
+                itemDiv.innerHTML = `
+                    <input type="checkbox" id="${itemId}" name="items" value="${item.name}" 
+                           class="form-checkbox h-5 w-5 text-emerald-600 rounded border-gray-300 focus:ring-emerald-500 cursor-pointer">
+                    <label for="${itemId}" class="text-gray-700 font-medium cursor-pointer">${item.name}</label>
+                `;
+                container.appendChild(itemDiv);
+            });
+        };
+        
+        const handleAddItem = async (event) => {
+            event.preventDefault();
+            
+            if (!db || !userId) {
+                showMessage("Database connection not ready.", 'error');
+                return;
+            }
+
+            const itemName = getEl('item-name').value.trim();
+            if (!itemName) {
+                showMessage("Please enter an item name.", 'error');
+                return;
+            }
+
+            const itemData = { name: itemName, updatedAt: serverTimestamp() };
+
+            try {
+                const itemsColRef = collection(db, ITEMS_COL_PATH(userId));
+                await addDoc(itemsColRef, itemData);
+                showMessage(`Item '${itemName}' added successfully!`, 'success');
+                event.target.reset();
+            } catch (e) {
+                console.error("Error managing item: ", e);
+                showMessage("An error occurred while saving the item.", 'error');
+            }
+        };
+
+        const renderAdminItemsList = () => {
+            const listEl = getEl('admin-items-list');
+            listEl.innerHTML = ''; 
+
+            if (kalolsavamItems.length === 0) {
+                listEl.innerHTML = '<p class="text-center text-sky-600 p-4">No items defined yet.</p>';
+                return;
+            }
+
+            kalolsavamItems.forEach(item => {
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-3 rounded-lg shadow-sm border-l-4 border-emerald-500 space-y-2 sm:space-y-0';
+                
+                itemDiv.innerHTML = `
+                    <p class="font-semibold text-gray-800">${item.name}</p>
+                    <div class="flex space-x-2 flex-wrap justify-end">
+                        <button data-name="${item.name}" class="generate-rubric-btn bg-purple-500 hover:bg-purple-600 text-white text-xs font-semibold py-1 px-3 rounded-full transition duration-150 shadow-md">
+                            Generate Rubric ✨
+                        </button>
+                        <button data-id="${item.id}" class="delete-item-btn bg-red-500 hover:bg-red-600 text-white text-xs font-semibold py-1 px-3 rounded-full transition duration-150 shadow-md">
+                            Delete
+                        </button>
+                    </div>
+                `;
+                listEl.appendChild(itemDiv);
+            });
+        };
+
+        // --- Firebase Listeners ---
+
+        const setupFirestoreListeners = () => {
+            if (!db || !userId) {
+                console.log("Firestore or userId not available. Skipping listener setup.");
+                return;
+            }
+
+            // 1. Listen for Item Changes
+            onSnapshot(query(collection(db, ITEMS_COL_PATH(userId))), (snapshot) => {
+                kalolsavamItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderRegistrationItems();
+                renderAdminItemsList();
+                if (currentAdminView === 'result-entry') {
+                    renderItemSelectionForResults();
+                }
+                if (currentPublicView === 'results') {
+                     renderPublicResultsControls();
+                }
+            }, (error) => {
+                console.error("Error listening to items: ", error);
+            });
+
+            // 2. Listen for Participant Changes
+            onSnapshot(query(collection(db, PARTICIPANTS_COL_PATH(userId))), (snapshot) => {
+                participantsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderParticipantsList();
+                if (currentAdminView === 'result-entry') {
+                    const selectedItemId = getEl('result-item-select').value;
+                    if (selectedItemId) loadParticipantsForResults(selectedItemId);
+                }
+            }, (error) => {
+                console.error("Error listening to participants: ", error);
+            });
+            
+            // 3. Listen for Results Changes
+            onSnapshot(query(collection(db, RESULTS_COL_PATH(userId))), (snapshot) => {
+                resultsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                if (currentPublicView === 'results') {
+                    const selectedItemName = getEl('public-results-item-select').value;
+                    if (selectedItemName) displayPublicResults(selectedItemName);
+                }
+            }, (error) => {
+                console.error("Error listening to results: ", error);
+            });
+
+            // 4. Listen for Admin Config (Code Counter)
+            onSnapshot(doc(db, ADMIN_CONFIG_DOC_PATH(userId)), (docSnap) => {
+                // Listener for config updates
+            }, (error) => {
+                 console.log("Error listening to admin config:", error.code);
+            });
+        };
+
+
+        // --- Initialization and Event Wiring ---
+
+        const initApp = async () => {
+            try {
+                // 1. Firebase Initialization
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is empty. Cannot initialize.");
+                    return;
+                }
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // 2. Authentication Setup (FIXED: Robust onAuthStateChanged pattern)
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        // User is successfully signed in/authenticated
+                        userId = user.uid;
+                        isAuthReady = true;
+                        getEl('user-id-display').textContent = userId;
+                        setupFirestoreListeners();
+                        showMessage("Authentication successful. App is ready.", 'success');
+                    } else if (!isAuthReady) {
+                        // Initial state change (user is null), attempt sign-in
+                        try {
+                            if (initialAuthToken) {
+                                // This will trigger the onAuthStateChanged callback again with the authenticated user
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                // This will trigger the onAuthStateChanged callback again with the anonymous user
+                                await signInAnonymously(auth);
+                            }
+                        } catch (e) {
+                            console.error("Initial sign-in failed:", e);
+                            isAuthReady = true; // Mark as ready to prevent infinite loops, even if failed
+                            getEl('user-id-display').textContent = 'AUTH_FAILED';
+                            showMessage("Authentication failed. Database features disabled.", 'error');
+                        }
+                    } else {
+                        // This handles logouts after the initial setup
+                        userId = null;
+                        getEl('user-id-display').textContent = 'Signed Out';
+                    }
+                });
+
+                // 3. Wait for LLM library (marked.js) to load before wiring up LLM buttons
+                let attempts = 0;
+                while (typeof marked === 'undefined' && attempts < 20) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    attempts++;
+                }
+                if (typeof marked === 'undefined') {
+                    showMessage("Error: Markdown library failed to load. LLM features disabled.", 'error');
+                } 
+
+
+                // 4. Event Wiring
+                // Public View Controls
+                getEl('btn-view-registration').addEventListener('click', () => switchPublicView('registration'));
+                getEl('btn-view-results').addEventListener('click', () => switchPublicView('results'));
+                getEl('public-results-item-select').addEventListener('change', (e) => displayPublicResults(e.target.value));
+
+                // Registration
+                getEl('registration-form').addEventListener('submit', handleRegistration);
+                window.previewImage = previewImage; 
+
+                // Admin Auth & Navigation
+                getEl('admin-login-form').addEventListener('submit', handleAdminLogin);
+                getEl('btn-admin-login-wrapper').addEventListener('click', openAdminLoginModal);
+                getEl('btn-admin-logout').addEventListener('click', handleAdminLogout);
+                getEl('btn-admin-view-item-management').addEventListener('click', () => switchAdminView('item-management'));
+                getEl('btn-admin-view-participant-list').addEventListener('click', () => switchAdminView('participant-list'));
+                getEl('btn-admin-view-result-entry').addEventListener('click', () => switchAdminView('result-entry'));
+
+                // Admin Item Management
+                getEl('admin-item-form').addEventListener('submit', handleAddItem);
+                getEl('admin-items-list').addEventListener('click', async (e) => {
+                    const id = e.target.dataset.id;
+                    const name = e.target.dataset.name;
+                    if (e.target.classList.contains('delete-item-btn')) {
+                        if (await customConfirm(`Are you sure you want to delete the item: ${name}?`)) {
+                             if (!db) return showMessage("Database not ready.", 'error');
+                             await deleteDoc(doc(db, ITEMS_COL_PATH(userId), id));
+                             showMessage("Item deleted.", 'info');
+                        }
+                    } else if (e.target.classList.contains('generate-rubric-btn') && typeof marked !== 'undefined') {
+                        await handleGenerateRubric(name);
+                    } else if (e.target.classList.contains('generate-rubric-btn')) {
+                         showMessage("LLM feature not available yet.", 'error');
+                    }
+                });
+
+                // Admin Schedule Suggestor
+                getEl('btn-generate-schedule').addEventListener('click', (e) => {
+                    if (typeof marked !== 'undefined') {
+                       handleGenerateSchedule();
+                    } else {
+                        showMessage("LLM feature not available yet.", 'error');
+                    }
+                });
+
+
+                // Admin Participant List
+                getEl('participants-list').addEventListener('click', async (e) => {
+                    if (e.target.classList.contains('generate-print-btn')) {
+                        await generateCodeAndPrint(e.target.dataset.id);
+                    }
+                });
+
+                // Admin Result Entry
+                getEl('result-item-select').addEventListener('change', (e) => loadParticipantsForResults(e.target.value));
+                getEl('result-participants-list').addEventListener('change', (e) => {
+                    const target = e.target;
+                    if (target.tagName === 'INPUT') {
+                        saveResult(target.dataset.participantId, target.dataset.field, target.value);
+                    }
+                });
+                getEl('btn-publish-results').addEventListener('click', (e) => {
+                    const itemId = e.target.dataset.itemId;
+                    const isPublished = e.target.dataset.published === 'true';
+                    if (itemId) togglePublishResults(itemId, isPublished);
+                });
+                
+                // Admin Reporting
+                getEl('btn-report-overall').addEventListener('click', () => {
+                     if (typeof marked !== 'undefined') {
+                       handleGenerateReport('overall');
+                    } else {
+                        showMessage("LLM feature not available yet.", 'error');
+                    }
+                });
+                getEl('btn-report-item').addEventListener('click', (e) => {
+                    const itemId = e.target.dataset.itemId;
+                    const itemName = e.target.dataset.itemName;
+                    if (itemId && typeof marked !== 'undefined') {
+                        handleGenerateReport('item', { id: itemId, name: itemName });
+                    } else {
+                        showMessage("LLM feature not available yet.", 'error');
+                    }
+                });
+
+
+                // Close Report/Rubric Modal
+                getEl('close-report-modal').addEventListener('click', () => {
+                    getEl('report-modal').classList.add('hidden');
+                });
+                
+            } catch (error) {
+                console.error("CRITICAL ERROR during app initialization:", error);
+                showMessage("Critical Error: App failed to start. Check console.", 'error');
+            }
+        };
+
+        // Start the app when the DOM content is fully loaded
+        document.addEventListener('DOMContentLoaded', initApp);
+
+    </script>
+</head>
+<body class="min-h-screen p-2 sm:p-4">
+
+    <!-- Report/Rubric Modal (Gemini Feature) -->
+    <div id="report-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-40 flex items-center justify-center no-print">
+        <div class="bg-white p-4 sm:p-8 rounded-xl shadow-2xl w-full max-w-3xl h-[95vh] sm:h-[90vh] flex flex-col border-t-4 border-purple-600 mx-2">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="report-title" class="text-xl sm:text-2xl font-bold text-purple-700">Report/Rubric</h3>
+                <button id="close-report-modal" class="text-gray-500 hover:text-red-500 transition duration-150 p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+            <div id="report-content" class="flex-grow overflow-y-auto border p-4 rounded-lg bg-gray-50">
+                <!-- Generated content will be placed here -->
+            </div>
+            <div class="mt-4 text-xs text-gray-500 text-center">
+                Content generated using the Gemini API.
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Confirmation Modal (Replaces window.confirm) -->
+    <div id="confirm-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-40 flex items-center justify-center no-print">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full transform transition-all duration-300 scale-100 mx-2">
+            <p id="confirm-message" class="text-lg font-semibold text-gray-800 mb-6"></p>
+            <div class="flex justify-end space-x-3">
+                <button id="confirm-no" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 font-medium transition duration-150">
+                    Cancel
+                </button>
+                <button id="confirm-yes" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium transition duration-150">
+                    Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Admin Login Modal -->
+    <div id="admin-login-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-30 flex items-center justify-center no-print">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm border-t-4 border-sky-600 mx-2">
+            <h3 class="text-2xl font-bold text-sky-700 mb-6 text-center">Admin Login</h3>
+            <form id="admin-login-form" class="space-y-4">
+                <p class="text-sm text-gray-500 text-center mb-6">
+                    <span class="font-bold">U: Admin</span> | <span class="font-bold">P: Ahmad@123</span>
+                </p>
+                <div>
+                    <input type="text" id="admin-modal-username" placeholder="Username" required 
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-sky-500 focus:border-sky-500">
+                </div>
+                <div>
+                    <input type="password" id="admin-modal-password" placeholder="Password" required
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-sky-500 focus:border-sky-500">
+                </div>
+                <button type="submit" class="w-full py-3 bg-sky-600 text-white font-bold rounded-lg hover:bg-sky-700 transition duration-300 shadow-md">
+                    Log In
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Floating Message Box -->
+    <div id="message-box" class="opacity-0 fixed top-4 left-1/2 transform -translate-x-1/2 z-50 p-4 text-white rounded-lg shadow-xl transition-opacity duration-300 no-print"></div>
+
+    <header class="mb-8 max-w-4xl mx-auto">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center">
+            <div class="text-center md:text-left mb-4 md:mb-0">
+                <h1 class="animated-heading text-4xl sm:text-5xl font-extrabold text-emerald-800 mb-1 leading-tight">
+                    Kalolsavam Portal
+                </h1>
+                <p class="text-lg text-amber-600 font-medium">LPS Vilakkupara Management</p>
+                <p class="text-xs text-gray-400 mt-2">
+                    Desk ID: <span id="user-id-display" class="font-mono text-gray-500">Loading...</span>
+                </p>
+            </div>
+
+            <!-- Admin Login/Logout (Top Right) -->
+            <div class="pt-2 flex flex-col items-end space-y-2 w-full md:w-auto">
+                 <button id="btn-admin-login-wrapper" class="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-lg shadow-md transition duration-200 w-full">
+                    Admin Login
+                </button>
+                <button id="btn-admin-logout" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg shadow-md transition duration-200 hidden w-full">
+                    Admin Logout
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto">
+        
+        <!-- Public View Navigation -->
+        <div id="public-view-nav" class="flex space-x-2 sm:space-x-4 mb-8">
+            <button id="btn-view-registration" class="flex-1 py-3 px-2 sm:px-4 bg-emerald-700 text-white text-sm sm:text-base font-bold rounded-xl shadow-lg transition duration-200">
+                Registration
+            </button>
+            <button id="btn-view-results" class="flex-1 py-3 px-2 sm:px-4 bg-red-500 text-white text-sm sm:text-base font-bold rounded-xl shadow-lg transition duration-200">
+                Published Results
+            </button>
+        </div>
+        
+        <!-- Main Registration View -->
+        <div id="main-view-container">
+            <section id="registration-panel" class="bg-white p-6 sm:p-10 rounded-3xl shadow-2xl border-t-8 border-emerald-600">
+                <h2 class="text-3xl font-bold text-emerald-700 mb-6">Student Registration</h2>
+                
+                <form id="registration-form">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        <div>
+                            <label for="participant-name" class="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
+                            <input type="text" id="participant-name" required class="w-full px-4 py-2 border border-gray-300 rounded-xl focus:ring-sky-500 focus:border-sky-500 shadow-inner transition duration-150" placeholder="e.g., Anjali P. K.">
+                        </div>
+                        <div>
+                            <label for="participant-contact" class="block text-sm font-medium text-gray-700 mb-1">Contact Number *</label>
+                            <!-- Using type="tel" for better mobile keyboard access -->
+                            <input type="tel" id="participant-contact" required class="w-full px-4 py-2 border border-gray-300 rounded-xl focus:ring-sky-500 focus:border-sky-500 shadow-inner transition duration-150" placeholder="e.g., 9876543210">
+                        </div>
+                        <div>
+                            <label for="participant-school" class="block text-sm font-medium text-gray-700 mb-1">School Name *</label>
+                            <input type="text" id="participant-school" required class="w-full px-4 py-2 border border-gray-300 rounded-xl focus:ring-sky-500 focus:border-sky-500 shadow-inner transition duration-150" placeholder="e.g., GHSS Thrippunithura">
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label for="participant-class" class="block text-sm font-medium text-gray-700 mb-1">Class *</label>
+                                <input type="text" id="participant-class" required class="w-full px-4 py-2 border border-gray-300 rounded-xl focus:ring-sky-500 focus:border-sky-500 shadow-inner transition duration-150" placeholder="e.g., V">
+                            </div>
+                            <div>
+                                <label for="participant-division" class="block text-sm font-medium text-gray-700 mb-1">Division *</label>
+                                <input type="text" id="participant-division" required class="w-full px-4 py-2 border border-gray-300 rounded-xl focus:ring-sky-500 focus:border-sky-500 shadow-inner transition duration-150" placeholder="e.g., A">
+                            </div>
+                        </div>
+                        <!-- Photo Upload Section: Enhanced for clarity and feedback -->
+                        <div class="md:col-span-2 flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4 p-4 border border-dashed rounded-xl bg-gray-50">
+                            <img id="photo-preview" src="https://placehold.co/100x100/34d399/ffffff?text=Photo" 
+                                class="w-24 h-24 object-cover rounded-lg border-2 border-emerald-400 shadow-md flex-shrink-0" alt="Participant Photo Preview">
+                            <div class="flex-grow w-full">
+                                <label for="photo-upload" class="block text-sm font-medium text-gray-700 mb-1">Upload Photo (Max 500KB)</label>
+                                <input type="file" id="photo-upload" accept="image/*" onchange="window.previewImage(event)"
+                                   class="w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold
+                                          file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 transition duration-200 cursor-pointer"/>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-8">
+                        <label class="block text-lg font-semibold text-emerald-700 mb-3">Select Items to Participate In *</label>
+                        <div id="registration-items-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                            <!-- Items will be dynamically loaded here by JavaScript -->
+                            <p class="text-gray-500 italic col-span-full">Loading cultural items...</p>
+                        </div>
+                    </div>
+
+                    <button type="submit" 
+                            class="w-full py-3 bg-emerald-600 text-white text-xl font-bold rounded-xl hover:bg-emerald-700 transition duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.01]">
+                        Submit Registration Form
+                    </button>
+                </form>
+            </section>
+            
+            <!-- Public Results View -->
+            <section id="public-results-panel" class="bg-white p-6 sm:p-10 rounded-3xl shadow-2xl border-t-8 border-red-600 hidden">
+                <h2 class="text-3xl font-bold text-red-700 mb-6">Published Results</h2>
+                
+                <div class="mb-6">
+                    <label for="public-results-item-select" class="block text-lg font-semibold text-gray-700 mb-2">Select Item to View Standings</label>
+                    <select id="public-results-item-select" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500 shadow-inner">
+                        <!-- Options filled by JS -->
+                    </select>
+                </div>
+
+                <div class="overflow-x-auto shadow-xl rounded-xl">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-red-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-red-700 uppercase tracking-wider">Rank</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-red-700 uppercase tracking-wider">Participant Name</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-red-700 uppercase tracking-wider">Code</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-red-700 uppercase tracking-wider">Grade</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-red-700 uppercase tracking-wider">Score</th>
+                            </tr>
+                        </thead>
+                        <tbody id="public-results-table-body" class="bg-white divide-y divide-gray-200">
+                            <tr class="bg-white"><td colspan="5" class="p-4 text-center text-gray-500">Select an item to view published results.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+
+        <!-- === ADMIN DASHBOARD === -->
+        <section id="admin-dashboard-container" class="hidden p-6 sm:p-10 rounded-3xl shadow-2xl border-t-8 border-sky-600 bg-white space-y-10">
+            <h2 class="text-3xl font-bold text-sky-700 mb-6">Admin Dashboard</h2>
+
+            <!-- Admin Nav Tabs: Made responsive with flex-wrap and smaller text on mobile -->
+            <div class="flex flex-wrap gap-3 border-b-2 pb-3">
+                <button id="btn-admin-view-item-management" class="flex-1 min-w-0 py-2 px-3 sm:px-4 bg-sky-700 text-white font-semibold rounded-lg transition duration-200 shadow-md text-sm sm:text-base">
+                    Item Management ✨
+                </button>
+                <button id="btn-admin-view-participant-list" class="flex-1 min-w-0 py-2 px-3 sm:px-4 bg-sky-500 text-white font-semibold rounded-lg transition duration-200 shadow-md text-sm sm:text-base">
+                    Participants 👤
+                </button>
+                <button id="btn-admin-view-result-entry" class="flex-1 min-w-0 py-2 px-3 sm:px-4 bg-sky-500 text-white font-semibold rounded-lg transition duration-200 shadow-md text-sm sm:text-base">
+                    Result Entry 🏆
+                </button>
+            </div>
+
+
+            <!-- Item Management Section -->
+            <div id="admin-section-item-management" class="p-6 bg-sky-50 rounded-2xl border border-sky-200">
+                <h3 class="text-2xl font-semibold text-sky-700 mb-4 border-b pb-2">Cultural Item Management</h3>
+                
+                <form id="admin-item-form" class="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3 mb-6">
+                    <input type="text" id="item-name" required placeholder="New Item Name (e.g., Classical Dance)"
+                           class="flex-grow px-4 py-2 border border-gray-300 rounded-lg focus:ring-amber-500 focus:border-amber-500 transition duration-150">
+                    <button type="submit" class="py-2 px-6 bg-amber-600 text-white font-semibold rounded-lg hover:bg-amber-700 transition duration-300 shadow-md">
+                        Add Item
+                    </button>
+                </form>
+                
+                <!-- LLM Feature: Schedule Suggestor -->
+                <div class="mb-6">
+                    <button id="btn-generate-schedule" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition duration-300 shadow-lg flex items-center justify-center space-x-2">
+                        <span>Generate Competition Schedule</span> <span class="text-xl">✨</span>
+                    </button>
+                </div>
+
+
+                <div id="admin-items-list" class="space-y-3">
+                    <p class="text-gray-500 italic text-center">Loading current items...</p>
+                </div>
+            </div>
+
+            <!-- Participant List Section -->
+            <div id="admin-section-participant-list" class="hidden p-6 bg-emerald-50 rounded-2xl border border-emerald-200">
+                <h3 class="text-2xl font-semibold text-emerald-700 mb-4 border-b pb-2">Registered Participants (<span id="participant-count">0</span>)</h3>
+                
+                <div id="participants-list" class="space-y-4">
+                    <p class="text-gray-500 italic text-center">Loading registered participants...</p>
+                </div>
+            </div>
+
+            <!-- Result Entry Section -->
+            <div id="admin-section-result-entry" class="hidden p-6 bg-red-50 rounded-2xl border border-red-200">
+                <h3 class="text-2xl font-semibold text-red-700 mb-4 border-b pb-2">Result Entry & Publishing</h3>
+                
+                <div class="mb-6">
+                    <label for="result-item-select" class="block text-lg font-semibold text-gray-700 mb-2">Select Item</label>
+                    <select id="result-item-select" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500 shadow-inner">
+                        <!-- Options filled by JS -->
+                    </select>
+                </div>
+
+                <div id="result-management-controls" class="hidden mb-6 p-4 bg-red-100 rounded-xl flex flex-col sm:flex-row justify-between space-y-3 sm:space-y-0 sm:space-x-3">
+                    <button id="btn-publish-results" class="py-2 px-4 text-white font-bold rounded-lg transition duration-200 shadow-md flex-1">
+                        Publish Results
+                    </button>
+                    <button id="btn-report-item" data-item-id="" data-item-name="" class="py-2 px-4 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg transition duration-200 shadow-md flex-1">
+                        Generate Item Report 📈
+                    </button>
+                    <button id="btn-report-overall" class="py-2 px-4 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg transition duration-200 shadow-md flex-1">
+                        Generate Overall Report 📊
+                    </button>
+                </div>
+
+                <!-- Result Entry Header (made responsive) -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 bg-red-200 p-3 rounded-t-lg font-bold text-red-800 text-sm">
+                    <div class="col-span-2 md:col-span-1">Participant</div>
+                    <div>Score</div>
+                    <div>Grade</div>
+                    <div>Rank</div>
+                </div>
+
+                <div id="result-participants-list" class="space-y-3 p-2 bg-white rounded-b-lg">
+                    <p class="text-gray-500 italic p-4">Select an item above to load participants.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+    
+    <!-- Printing Container (Hidden, only for print layout) -->
+    <div id="print-card-container" class="hidden p-4">
+        <!-- Card content inserted here by printParticipantCard() function -->
+    </div>
+</body>
+</html>
